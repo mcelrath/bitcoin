@@ -120,6 +120,21 @@ class CVectorWriter
     {
         return nType;
     }
+    void seek(size_t nSize)
+    {
+        nPos += nSize;
+        if(nPos > vchData.size())
+            vchData.resize(nPos);
+    }
+    size_t GetPos() const {
+        return nPos;
+    }
+    void SetPos(size_t pos) {
+        nPos = pos;
+        if(nPos > vchData.size())
+            vchData.resize(nPos);
+    }
+
 private:
     const int nType;
     const int nVersion;
@@ -178,6 +193,8 @@ public:
 
     size_t size() const { return m_data.size() - m_pos; }
     bool empty() const { return m_data.size() == m_pos; }
+    void seek(size_t offset) { m_read_pos += offset; }
+    size_t pos() const     { return m_read_pos; }
 
     void read(char* dst, size_t n)
     {

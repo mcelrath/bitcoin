@@ -190,11 +190,11 @@ public:
 
     int GetVersion() const { return m_version; }
     int GetType() const { return m_type; }
+    size_t GetPos() const { return m_pos; }
 
     size_t size() const { return m_data.size() - m_pos; }
     bool empty() const { return m_data.size() == m_pos; }
-    void seek(size_t offset) { m_read_pos += offset; }
-    size_t pos() const     { return m_read_pos; }
+    void seek(size_t offset) { m_pos += offset; }
 
     void read(char* dst, size_t n)
     {

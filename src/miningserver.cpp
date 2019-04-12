@@ -7,8 +7,8 @@
 #include <netbase.h>
 #include <streams.h>
 #include <sync.h>
-#include <util.h>
-#include <utilstrencodings.h>
+#include <util/system.h>
+#include <util/strencodings.h>
 #include <validation.h>
 #include <validationinterface.h>
 
@@ -534,7 +534,7 @@ static void ReadCallback(evutil_socket_t sock, short events, void* event_ctx) {
                 if (client->m_msg_read_buffer.size() == 3) {
                     uint8_t message_length_high;
                     uint16_t message_length_low;
-                    VectorReader reader(client->m_msg_read_buffer, SER_NETWORK, PROTOCOL_VERSION);
+                    VectorReader reader(SER_NETWORK, PROTOCOL_VERSION, client->m_msg_read_buffer, 0);
                     reader >> message_length_low >> message_length_high;
                     uint32_t message_length = (((uint32_t)message_length_high) << 16) | message_length_low;
 
@@ -569,7 +569,7 @@ static void ReadCallback(evutil_socket_t sock, short events, void* event_ctx) {
 
                         uint8_t message_type_byte, message_length_low;
                         uint16_t message_length_high, min_protocol_version, max_protocol_version;
-                        VectorReader reader(client->m_msg_read_buffer, SER_NETWORK, PROTOCOL_VERSION);
+                        VectorReader reader(SER_NETWORK, PROTOCOL_VERSION, client->m_msg_read_buffer, 0);
                         reader >> message_type_byte >> message_length_low >> message_length_high
                                >> min_protocol_version >> max_protocol_version >> client->m_flags;
 
@@ -652,7 +652,7 @@ static void ReadCallback(evutil_socket_t sock, short events, void* event_ctx) {
                         break;
                     }
                     case MsgTypes::ADDITIONAL_COINBASE_LENGTH: {
-                        VectorReader reader(client->m_msg_read_buffer, SER_NETWORK, PROTOCOL_VERSION);
+                        VectorReader reader(SER_NETWORK, PROTOCOL_VERSION, client->m_msg_read_buffer, 0);
                         reader >> client->m_coinbase_tx_overhead;
                         break;
                     }
@@ -660,7 +660,7 @@ static void ReadCallback(evutil_socket_t sock, short events, void* event_ctx) {
                         uint64_t template_id;
                         uint32_t header_version, header_timestamp, header_nonce;
                         uint8_t user_tag_len;
-                        VectorReader reader(client->m_msg_read_buffer, SER_NETWORK, PROTOCOL_VERSION);
+                        VectorReader reader(SER_NETWORK, PROTOCOL_VERSION, client->m_msg_read_buffer, 0);
                         reader >> template_id >> header_version >> header_timestamp >> header_nonce >> user_tag_len;
 
                         if (client->m_msg_read_buffer.size() < 21 + (size_t)user_tag_len + 4) {
@@ -732,7 +732,7 @@ static void ReadCallback(evutil_socket_t sock, short events, void* event_ctx) {
                         LogPrint(BCLog::MININGSERVER, "Received TRANSACTION_DATA_REQUEST from %lu\n", client->m_client_id);
 
                         uint64_t template_id;
-                        VectorReader reader(client->m_msg_read_buffer, SER_NETWORK, PROTOCOL_VERSION);
+                        VectorReader reader(SER_NETWORK, PROTOCOL_VERSION, client->m_msg_read_buffer, 0);
                         reader >> template_id;
 
                         auto template_it = ctx->m_templates.find(template_id);
@@ -796,7 +796,7 @@ static void ReadCallback(evutil_socket_t sock, short events, void* event_ctx) {
                         uint64_t template_id, template_variant;
                         uint32_t header_version, header_timestamp, header_nonce;
                         uint8_t user_tag_len;
-                        VectorReader reader(client->m_msg_read_buffer, SER_NETWORK, PROTOCOL_VERSION);
+                        VectorReader reader(SER_NETWORK, PROTOCOL_VERSION, client->m_msg_read_buffer, 0);
                         reader >> template_id >> template_variant >> header_version >> header_timestamp >> header_nonce >> user_tag_len;
 
                         if (client->m_msg_read_buffer.size() != 29 + (size_t)user_tag_len) {

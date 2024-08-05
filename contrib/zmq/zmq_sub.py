@@ -38,7 +38,8 @@ port = 28332
 
 class ZMQHandler():
     def __init__(self):
-        self.loop = asyncio.get_event_loop()
+        print("ZMQHandler.__init__()")
+        self.loop = asyncio.new_event_loop()
         self.zmqContext = zmq.asyncio.Context()
 
         self.zmqSubSocket = self.zmqContext.socket(zmq.SUB)
@@ -51,7 +52,9 @@ class ZMQHandler():
         self.zmqSubSocket.connect("tcp://127.0.0.1:%i" % port)
 
     async def handle(self) :
-        topic, body, seq = await self.zmqSubSocket.recv_multipart()
+        print("ZMQHandler.handle()")
+        topic, body, seq = await self.zmqSubSocket.recv_multipart() # select() here
+        print("topic=%s body=%s seq=%s\n"%(topic, body, seq))
         sequence = "Unknown"
         if len(seq) == 4:
             sequence = str(struct.unpack('<I', seq)[-1])
@@ -73,15 +76,19 @@ class ZMQHandler():
             mempool_sequence = None if len(body) != 32+1+8 else struct.unpack("<Q", body[32+1:])[0]
             print('- SEQUENCE ('+sequence+') -')
             print(hash, label, mempool_sequence)
+        else:
+            print("Unknown topic %s"%topic)
         # schedule ourselves to receive the next message
         asyncio.ensure_future(self.handle())
 
     def start(self):
+        print("ZMQHandler.start()")
         self.loop.add_signal_handler(signal.SIGINT, self.stop)
         self.loop.create_task(self.handle())
         self.loop.run_forever()
 
     def stop(self):
+        print("ZMQHandler.stop()")
         self.loop.stop()
         self.zmqContext.destroy()
 

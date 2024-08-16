@@ -36,7 +36,7 @@ have `-cpunet` or they will fail.
 
 4. Generate blocks:
 
-        contrib/cpunet/miner --cli=src/bitcoin-cli --ongoing --address `src/bitcoin-cli -cpunet getnewaddress` --grind-cmd="src/bitcoin-util -cpunet grind"
+        contrib/cpunet/miner --cli=src/bitcoin-cli --ongoing --address `src/bitcoin-cli -cpunet getnewaddress` --grind-cmd="src/bitcoin-util -cpunet -ntasks=1 grind"
 
 TODO
 ====

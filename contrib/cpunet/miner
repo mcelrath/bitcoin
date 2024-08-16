@@ -18,15 +18,15 @@ import zmq
 import zmq.asyncio
 import signal
 
-EXIT_FAILURE = 1 # bitcoin-utils exit code
-
+# Add bitcoin's test harness framework to our import path.
 PATH_BASE_CONTRIB_CPUNET = os.path.abspath(os.path.dirname(os.path.realpath(__file__)))
 PATH_BASE_TEST_FUNCTIONAL = os.path.abspath(os.path.join(PATH_BASE_CONTRIB_CPUNET, "..", "..", "test", "functional"))
 sys.path.insert(0, PATH_BASE_TEST_FUNCTIONAL)
 
-from test_framework.blocktools import script_BIP34_coinbase_height # noqa: E402
-from test_framework.messages import CBlock, CBlockHeader, COutPoint, CTransaction, CTxIn, CTxOut, from_binary, from_hex, ser_string, ser_uint256, tx_from_hex, uint256_from_str, hash256 # noqa: E402
-from test_framework.script import CScriptOp # noqa: E402
+from test_framework.blocktools import script_BIP34_coinbase_height
+from test_framework.messages import CBlock, CBlockHeader, COutPoint, CTransaction, CTxIn, CTxOut, from_hex, ser_uint256, tx_from_hex, uint256_from_str, hash256
+
+EXIT_FAILURE = 1 # bitcoin-utils exit code
 
 logging.basicConfig(
     format='%(asctime)s %(levelname)s %(message)s',
@@ -60,10 +60,6 @@ class CPUMiner():
 
         self.zmqSubSocket = self.zmqContext.socket(zmq.SUB)
         self.zmqSubSocket.setsockopt(zmq.RCVHWM, 0)
-        self.zmqSubSocket.setsockopt_string(zmq.SUBSCRIBE, "hashblock")
-        self.zmqSubSocket.setsockopt_string(zmq.SUBSCRIBE, "hashtx")
-        self.zmqSubSocket.setsockopt_string(zmq.SUBSCRIBE, "rawblock")
-        self.zmqSubSocket.setsockopt_string(zmq.SUBSCRIBE, "rawtx")
         self.zmqSubSocket.setsockopt_string(zmq.SUBSCRIBE, "sequence")
         self.zmqSubSocket.connect("tcp://127.0.0.1:28338")
 
@@ -80,6 +76,14 @@ class CPUMiner():
         else:
             self.max_blocks = 1
 
+        if hasattr(args, "address") and hasattr(args, "descriptor"):
+            if args.address is None and args.descriptor is None:
+                sys.stderr.write("Must specify --address or --descriptor\n")
+                return 1
+            elif args.address is not None and args.descriptor is not None:
+                sys.stderr.write("Only specify one of --address or --descriptor\n")
+                return 1
+
         self.address = args.address
         self.descriptor = args.descriptor
         self.derived_addresses = {}
@@ -87,8 +91,27 @@ class CPUMiner():
         self.mining_process = None
         self.mined_blocks = 0
 
-        self.grind_cmd = args.grind_cmd
-        self.bcli = args.bcli
+        self.grind_cmd = args.grind_cmd.split(" ")
+        self.bcli_basecmd = args.cli.split(" ")
+
+    # We run bitcoin-cli asynchronously so that long-running commands like
+    # getblocktemplate don't stall us announcing a mined block or noticing a new
+    # block announcement.
+    async def bitcoin_cli(self, *args, input=b""):
+        cmd = self.bcli_basecmd + ["-cpunet"] + list(args)
+        logging.debug("Calling bitcoin-cli: %r", " ".join(cmd))
+        if input: logging.debug("    with input=%r", input)
+        bcli_process = await asyncio.create_subprocess_exec(*cmd,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE)
+        (stdout, stderr) = await bcli_process.communicate(input)
+        if bcli_process.returncode != 0:
+            logging.error("bitcoin-cli returned an error code %d\n\nstdout = %s \n\nstderr = %s\n"%(bcli_process.returncode, stdout, stderr))
+            self.stop()
+        logging.debug("    result = %s"%(stdout))
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode('utf8')
+        return stdout.strip()
 
     async def handle_zmq(self):
         topic, body, seq = await self.zmqSubSocket.recv_multipart()
@@ -112,28 +135,37 @@ class CPUMiner():
             self.stop()
 
         # gbt
-        tmpl = json.loads(self.bcli("getblocktemplate", '{"rules":["segwit"]}'))
+        tmpl = json.loads(await self.bitcoin_cli("getblocktemplate", '{"rules":["segwit"]}'))
         logging.debug("GBT template: %s", tmpl)
 
-        # address for reward
-        self.reward_addr, self.reward_spk = self.get_reward_addr_spk(tmpl["height"])
+        # Get address and scriptPubKey for reward
+        self.reward_addr, self.reward_spk = await self.get_reward_addr_spk(tmpl["height"])
 
-        mine_time = int(time.time())
-        if tmpl["mintime"] > mine_time:
-            logging.info("Updating block time from %d to %d", mine_time, tmpl["mintime"])
-            mine_time = tmpl["mintime"]
-            if mine_time > now:
-                logging.error("GBT mintime is in the future: %d is %d seconds later than %d", mine_time, (mine_time-now), now)
-                return 1
+        # Construct coinbase transaction
+        cbtx = CTransaction()
+        cbtx.vin = [CTxIn(COutPoint(0, 0xffffffff),
+                          script_BIP34_coinbase_height(tmpl["height"]), 0xffffffff)]
+        cbtx.vout = [CTxOut(tmpl["coinbasevalue"], self.reward_spk)]
+        cbtx.vin[0].nSequence = 2**32-2
+        cbtx.rehash()
 
-        # mine block
-        logging.debug("Mining block start=%s", mine_time)
-        block = generate_block(tmpl, self.reward_spk, blocktime=mine_time)
+        # Construct block
+        block = CBlock()
+        block.nVersion = tmpl["version"]
+        block.hashPrevBlock = int(tmpl["previousblockhash"], 16)
+        block.nTime = tmpl["curtime"]
+        if block.nTime < tmpl["mintime"]:
+            block.nTime = tmpl["mintime"]
+        block.nBits = int(tmpl["bits"], 16)
+        block.nNonce = 0
+        block.vtx = [cbtx] + [tx_from_hex(t["data"]) for t in tmpl["transactions"]]
+        block.hashMerkleRoot = block.calc_merkle_root()
 
+        # Mine Block
         logging.info("Mining Block: %s"%(block))
         headhex = CBlockHeader.serialize(block).hex()
-        cmd = self.grind_cmd.split(" ") + [headhex]
-        logging.debug("Calling grind command: %s"%(" ".join(cmd)))
+        cmd = self.grind_cmd + [headhex]
+        logging.debug("Calling grind command: %r"%(" ".join(cmd)))
         self.mining_process = await asyncio.create_subprocess_exec(*cmd,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         (stdout, stderr) = await self.mining_process.communicate()
@@ -144,35 +176,36 @@ class CPUMiner():
                 # By starting over here we get a new timestamp and a new block
                 # header to grind against. (So we're not re-grinding the same
                 # nonce range with the same block header)
+                logging.debug("Mining process ran out of nonce space. Restarting mining.")
                 pass
             else:
                 logging.error("Grind command returned with EXIT_FAILURE.  Exiting.")
                 self.stop()
-        elif self.mining_process.returncode == 0: # will be negative if SIGTERM
+        elif self.mining_process.returncode == 0: # Success
             self.mined_blocks += 1
             newhead = from_hex(CBlockHeader(), stdout.decode('utf8'))
             block.nNonce = newhead.nNonce
             block.rehash()
-            logging.info("Mined a block solution at height %d with hash: %s"%(tmpl["height"], block.hash))
 
-            # submit block
-            r = self.bcli("-stdin", "submitblock", input=block.serialize().hex().encode('utf8'))
-
-            # report
-            block.calc_sha256()
-            logging.debug("Block hash %s payout to %s", block.hash, self.reward_addr)
-            logging.debug("Solved block is %s", block)
+            # Submit block
+            r = await self.bitcoin_cli("-stdin", "submitblock", input=block.serialize().hex().encode('utf8'))
             if r != "":
                 logging.warning("submitblock returned %s for height %d hash %s", r, tmpl["height"], block.hash)
+
+            # Report
+            logging.info("Mined a block solution at height %d with hash: %s"%(tmpl["height"], block.hash))
+            logging.debug("Block hash %s payout to %s", block.hash, self.reward_addr)
+            logging.debug("Solved block is %s", block)
+
         # Run the next iteration
         asyncio.ensure_future(self.handle_grind())
 
-    def get_reward_address(self, height):
+    async def get_reward_address(self, height):
         if self.address is not None:
             return self.address
 
         if '*' not in self.descriptor:
-            addr = json.loads(self.bcli("deriveaddresses", self.descriptor))[0]
+            addr = json.loads(await self.bitcoin_cli("deriveaddresses", self.descriptor))[0]
             self.address = addr
             return addr
 
@@ -182,28 +215,28 @@ class CPUMiner():
 
         addr = self.derived_addresses.get(height, None)
         if addr is None:
-            addrs = json.loads(self.bcli("deriveaddresses", self.descriptor, "[%d,%d]" % (height, height+20)))
+            addrs = json.loads(await self.bitcoin_cli("deriveaddresses", self.descriptor, "[%d,%d]" % (height, height+20)))
             addr = addrs[0]
             for k, a in enumerate(addrs):
                 self.derived_addresses[height+k] = a
 
         return addr
 
-    def get_reward_addr_spk(self, height):
+    async def get_reward_addr_spk(self, height):
         assert self.address is not None or self.descriptor is not None
 
         if self.reward_spk is not None:
             return self.address, self.reward_spk
 
-        reward_addr = self.get_reward_address(height)
-        reward_spk = bytes.fromhex(json.loads(self.bcli("getaddressinfo", reward_addr))["scriptPubKey"])
+        reward_addr = await self.get_reward_address(height)
+        reward_spk = bytes.fromhex(json.loads(await self.bitcoin_cli("getaddressinfo", reward_addr))["scriptPubKey"])
         if self.address is not None:
             # will always be the same, so cache
             self.reward_spk = reward_spk
 
         return reward_addr, reward_spk
 
-    def start(self, args):
+    def start(self):
         self.loop.add_signal_handler(signal.SIGINT, self.stop)
         self.loop.create_task(self.handle_zmq())
         self.loop.create_task(self.handle_grind())
@@ -212,39 +245,6 @@ class CPUMiner():
     def stop(self):
         self.loop.stop()
         self.zmqContext.destroy()
-
-def create_coinbase(height, value, spk):
-    cb = CTransaction()
-    cb.vin = [CTxIn(COutPoint(0, 0xffffffff), script_BIP34_coinbase_height(height), 0xffffffff)]
-    cb.vout = [CTxOut(value, spk)]
-    return cb
-
-def generate_block(tmpl, reward_spk, *, blocktime=None):
-    cbtx = create_coinbase(height=tmpl["height"], value=tmpl["coinbasevalue"], spk=reward_spk)
-    cbtx.vin[0].nSequence = 2**32-2
-    cbtx.rehash()
-
-    block = CBlock()
-    block.nVersion = tmpl["version"]
-    block.hashPrevBlock = int(tmpl["previousblockhash"], 16)
-    block.nTime = tmpl["curtime"] if blocktime is None else blocktime
-    if block.nTime < tmpl["mintime"]:
-        block.nTime = tmpl["mintime"]
-    block.nBits = int(tmpl["bits"], 16)
-    block.nNonce = 0
-    block.vtx = [cbtx] + [tx_from_hex(t["data"]) for t in tmpl["transactions"]]
-
-    block.hashMerkleRoot = block.calc_merkle_root()
-
-    return block
-
-def bitcoin_cli(basecmd, args, **kwargs):
-    cmd = basecmd + ["-cpunet"] + args
-    logging.debug("Calling bitcoin-cli: %r", cmd)
-    out = subprocess.run(cmd, stdout=subprocess.PIPE, **kwargs, check=True).stdout
-    if isinstance(out, bytes):
-        out = out.decode('utf8')
-    return out.strip()
 
 def main():
     parser = argparse.ArgumentParser()
@@ -262,17 +262,6 @@ def main():
 
     args = parser.parse_args(sys.argv[1:])
 
-    args.bcli = lambda *a, input=b"", **kwargs: bitcoin_cli(args.cli.split(" "), list(a), input=input, **kwargs)
-
-    if hasattr(args, "address") and hasattr(args, "descriptor"):
-        if args.address is None and args.descriptor is None:
-            sys.stderr.write("Must specify --address or --descriptor\n")
-            return 1
-        elif args.address is not None and args.descriptor is not None:
-            sys.stderr.write("Only specify one of --address or --descriptor\n")
-            return 1
-        args.derived_addresses = {}
-
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
     elif args.quiet:
@@ -281,7 +270,7 @@ def main():
         logging.getLogger().setLevel(logging.INFO)
 
     daemon = CPUMiner(args)
-    daemon.start(args)
+    daemon.start()
 
 if __name__ == "__main__":
     main()
